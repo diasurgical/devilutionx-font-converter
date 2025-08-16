@@ -1,8 +1,10 @@
 import argparse
 import dataclasses
+import math
 import multiprocessing
 import os
 
+import PIL.Image
 import freetype
 import tqdm
 import wand.drawing
@@ -20,7 +22,6 @@ class DrawSettings:
 @dataclasses.dataclass(frozen=True, slots=True)
 class FontMetrics:
     ascender: int
-    descender: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -59,7 +60,8 @@ def make_glyphs(
         for i, cp in enumerate(code_points):
             ctx.text(
                 x=draw_settings.stroke_width,
-                y=get_text_y(font_metrics, i, frame_height),
+                y=get_text_y(font_metrics, i, frame_height)
+                + draw_settings.stroke_width,
                 body=cp,
             )
 
@@ -85,7 +87,8 @@ def make_glyphs(
                     for i, cp in enumerate(code_points):
                         stroke_ctx.text(
                             x=draw_settings.stroke_width,
-                            y=get_text_y(font_metrics, i, frame_height),
+                            y=get_text_y(font_metrics, i, frame_height)
+                            + draw_settings.stroke_width,
                             body=cp,
                         )
                     stroke_ctx.draw(stroke_img)
@@ -104,6 +107,8 @@ def make_glyphs(
             ctx.draw(img)
             img.save(filename=f"{output_prefix}.png")
 
+        convert_png_rgba_to_pcx_8bit(output_prefix)
+
         with open(f"{output_prefix}.txt", "w") as f:
             f.write(
                 "\n".join(
@@ -112,6 +117,56 @@ def make_glyphs(
                 )
                 + "\n"
             )
+
+
+def convert_png_rgba_to_pcx_8bit(
+    path_prefix: str,
+    transparency_threshold: int = 0,
+    partial_alpha_background: tuple[int, int, int] = (0, 0, 0),
+    palette_transparent_index: int = 1,
+):
+    """Converts a PNG image to 8-bit PCX image with _PALETTE.
+
+    Args:
+        path_prefix: basename of the PNG file (without extension).
+        transparency_threshold: Pixels with alpha <= this threshold will be made fully transparent.
+        partial_alpha_background: Partially transparent pixels will be blended with this color.
+        palette_transparent_index: The index of the transparent color in `_PALETTE`.
+    """
+    palette = _PALETTE
+
+    im = PIL.Image.open(f"{path_prefix}.png")
+
+    if im.getbands().count != 4:
+        im = im.convert("RGBA")
+
+    alpha = im.getchannel("A")
+    blend_mask = alpha.point(lambda p: 0 if p <= transparency_threshold else p)
+    im_rgb = PIL.Image.new("RGB", im.size, partial_alpha_background)
+    im_rgb.paste(im, (0, 0), blend_mask)
+
+    # Can't figure out how to quantize images with mask.
+    # For now, as a hack, we fill transparent pixels with the RGB color
+    # corresponding to the transparent color (bright green) and hope for the best.
+    transparent_color_rgb = (
+        palette[3 * palette_transparent_index],
+        palette[3 * palette_transparent_index + 1],
+        palette[3 * palette_transparent_index + 2],
+    )
+    im_rgb.paste(
+        transparent_color_rgb,
+        (0, 0),
+        alpha.point(lambda p: 0 if p > transparency_threshold else 255),
+    )
+
+    # This is a dummy image that only exist for passing the palette to `quantize`.
+    im_pal = PIL.Image.new("P", (0, 0), palette_transparent_index)
+    im_pal.putpalette(palette)
+
+    quantized = im_rgb.quantize(palette=im_pal)
+    quantized.save(
+        f"{path_prefix}.pcx", palette=palette, transparency=palette_transparent_index
+    )
 
 
 def created_tiled_texture(texture_path: str, frame_height: int) -> wand.image.Image:
@@ -149,7 +204,7 @@ def get_code_point_ranges(
             ft_slot: freetype.GlyphSlot = ft_font.glyph
             ft_glyph_metrics: freetype.GlyphMetrics = ft_slot.metrics
             range_metrics.append(
-                GlyphMetrics(text_width=ft_glyph_metrics.horiAdvance >> 6)
+                GlyphMetrics(text_width=math.ceil(ft_glyph_metrics.horiAdvance / 64))
             )
 
         if have_glyphs:
@@ -158,15 +213,15 @@ def get_code_point_ranges(
 
     ft_size_metrics: freetype.SizeMetrics = ft_font.size
     font_metrics = FontMetrics(
-        ascender=freetype.FT_MulFix(ft_size_metrics.ascender, ft_size_metrics.y_scale)
-        >> 6,
-        descender=freetype.FT_MulFix(ft_size_metrics.descender, ft_size_metrics.y_scale)
-        >> 6,
+        ascender=math.ceil(
+            freetype.FT_MulFix(ft_size_metrics.ascender, ft_size_metrics.y_scale) / 64
+        ),
     )
 
     return font_metrics, ranges, ranges_metrics
 
 
+_PALETTE = None
 _MP_TILED_TEXTURE = None
 
 
@@ -217,6 +272,10 @@ def convert_font(
         font_path=font_path, font_size=font_size, min_cp=min_cp, max_cp=max_cp
     )
     os.makedirs(output_directory, exist_ok=True)
+
+    global _PALETTE
+    with open(os.path.join(_DATADIR, "palette.pal"), "rb") as f:
+        _PALETTE = f.read()
 
     # Threading doesn't appear to work with wand-py, so we use multiprocessing.
     with multiprocessing.Pool(
