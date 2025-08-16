@@ -10,17 +10,26 @@ import wand.image
 
 _DATADIR = os.path.join(os.path.dirname(__file__), "data")
 
-_STROKE_COLOR = "rgb(19, 11, 0)"
 
-
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class DrawSettings:
     stroke_color: str
     stroke_width: int
 
 
-def get_text_y(m: wand.drawing.FontMetrics, i: int, frame_height: int) -> int:
-    return int(m.ascender) + (i * frame_height)
+@dataclasses.dataclass(frozen=True, slots=True)
+class FontMetrics:
+    ascender: int
+    descender: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class GlyphMetrics:
+    text_width: int
+
+
+def get_text_y(m: FontMetrics, i: int, frame_height: int) -> int:
+    return m.ascender + (i * frame_height)
 
 
 def make_glyphs(
@@ -30,6 +39,8 @@ def make_glyphs(
     tiled_texture: wand.image.Image | None,
     frame_height: int,
     cp_range: tuple[int, int],
+    glyph_metrics: list[GlyphMetrics],
+    font_metrics: FontMetrics,
     output_directory: str,
 ):
     with wand.drawing.Drawing() as ctx:
@@ -41,14 +52,16 @@ def make_glyphs(
             ctx.stroke_width = draw_settings.stroke_width
 
         code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
-        with wand.image.Image(width=100, height=100) as tmp:
-            font_metrics: list[wand.drawing.FontMetrics] = [
-                ctx.get_font_metrics(tmp, text=cp) for cp in code_points
-            ]
-        max_width = int(max(m.text_width for m in font_metrics))
+        max_width = (
+            max(m.text_width for m in glyph_metrics) + 2 * draw_settings.stroke_width
+        )
 
-        for i, (cp, m) in enumerate(zip(code_points, font_metrics)):
-            ctx.text(x=0, y=get_text_y(m, i, frame_height), body=cp)
+        for i, cp in enumerate(code_points):
+            ctx.text(
+                x=draw_settings.stroke_width,
+                y=get_text_y(font_metrics, i, frame_height),
+                body=cp,
+            )
 
         if tiled_texture is not None:
             ctx.composite(
@@ -69,15 +82,19 @@ def make_glyphs(
                     stroke_ctx.fill_color = "none"
                     stroke_ctx.stroke_color = draw_settings.stroke_color
                     stroke_ctx.stroke_width = draw_settings.stroke_width
-                    for i, (cp, m) in enumerate(zip(code_points, font_metrics)):
-                        stroke_ctx.text(x=0, y=get_text_y(m, i, frame_height), body=cp)
+                    for i, cp in enumerate(code_points):
+                        stroke_ctx.text(
+                            x=draw_settings.stroke_width,
+                            y=get_text_y(font_metrics, i, frame_height),
+                            body=cp,
+                        )
                     stroke_ctx.draw(stroke_img)
                 ctx.composite(
                     operator="plus",
                     left=0,
                     top=0,
-                    width=max_width,
-                    height=frame_height * 256,
+                    width=0,  # use existing width
+                    height=0,  # use existing height
                     image=stroke_img,
                 )
 
@@ -88,7 +105,13 @@ def make_glyphs(
             img.save(filename=f"{output_prefix}.png")
 
         with open(f"{output_prefix}.txt", "w") as f:
-            f.write("\n".join(str(int(m.text_width)) for m in font_metrics) + "\n")
+            f.write(
+                "\n".join(
+                    str(m.text_width + 2 * draw_settings.stroke_width)
+                    for m in glyph_metrics
+                )
+                + "\n"
+            )
 
 
 def created_tiled_texture(texture_path: str, frame_height: int) -> wand.image.Image:
@@ -101,19 +124,47 @@ def created_tiled_texture(texture_path: str, frame_height: int) -> wand.image.Im
 
 
 def get_code_point_ranges(
-    font_path: str, min_cp: int, max_cp: int
-) -> list[tuple[int, int]]:
+    font_path: str, font_size: int, min_cp: int, max_cp: int
+) -> tuple[FontMetrics, list[tuple[int, int]], list[list[GlyphMetrics]]]:
     ft_font = freetype.Face(font_path)
+    ft_font.set_char_size(font_size << 6)
+
     ranges = []
+    ranges_metrics: list[list[FontMetrics]] = []
     for begin in range(min_cp, max_cp + 1, 256):
         if begin >= 0xD800 and begin <= 0xDFFF:
             # Surrogate range
             continue
         end = min(begin + 256, max_cp + 1)
-        if all(ft_font.get_char_index(cp) == 0 for cp in range(begin, end)):
-            continue
-        ranges.append((begin, end))
-    return ranges
+
+        have_glyphs = False
+        range_metrics: list[GlyphMetrics] = []
+        for cp in range(begin, end):
+            idx = ft_font.get_char_index(cp)
+            if idx == 0:
+                range_metrics.append(GlyphMetrics(text_width=0))
+                continue
+            have_glyphs = True
+            ft_font.load_glyph(idx, freetype.FT_LOAD_RENDER)
+            ft_slot: freetype.GlyphSlot = ft_font.glyph
+            ft_glyph_metrics: freetype.GlyphMetrics = ft_slot.metrics
+            range_metrics.append(
+                GlyphMetrics(text_width=ft_glyph_metrics.horiAdvance >> 6)
+            )
+
+        if have_glyphs:
+            ranges.append((begin, end))
+            ranges_metrics.append(range_metrics)
+
+    ft_size_metrics: freetype.SizeMetrics = ft_font.size
+    font_metrics = FontMetrics(
+        ascender=freetype.FT_MulFix(ft_size_metrics.ascender, ft_size_metrics.y_scale)
+        >> 6,
+        descender=freetype.FT_MulFix(ft_size_metrics.descender, ft_size_metrics.y_scale)
+        >> 6,
+    )
+
+    return font_metrics, ranges, ranges_metrics
 
 
 _MP_TILED_TEXTURE = None
@@ -126,12 +177,14 @@ def mp_init(texture_path: str):
     _MP_TILED_TEXTURE = created_tiled_texture(texture_path, 100)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class MpTask:
     font_path: str
     font_size: int
     frame_height: int
     cp_range: tuple[int, int]
+    glyph_metrics: list[GlyphMetrics]
+    font_metrics: FontMetrics
     output_directory: str
     draw_settings: DrawSettings
 
@@ -144,6 +197,8 @@ def mp_work(task: MpTask):
         tiled_texture=_MP_TILED_TEXTURE,
         frame_height=task.frame_height,
         cp_range=task.cp_range,
+        glyph_metrics=task.glyph_metrics,
+        font_metrics=task.font_metrics,
         output_directory=task.output_directory,
     )
 
@@ -158,7 +213,9 @@ def convert_font(
     max_cp: int,
     draw_settings: DrawSettings,
 ) -> None:
-    ranges = get_code_point_ranges(font_path, min_cp, max_cp)
+    font_metrics, cp_ranges, glyph_metrics = get_code_point_ranges(
+        font_path=font_path, font_size=font_size, min_cp=min_cp, max_cp=max_cp
+    )
     os.makedirs(output_directory, exist_ok=True)
 
     # Threading doesn't appear to work with wand-py, so we use multiprocessing.
@@ -169,16 +226,18 @@ def convert_font(
     ) as pool:
         tasks = [
             MpTask(
-                font_path,
-                font_size,
-                frame_height,
-                cp_range,
-                output_directory,
-                draw_settings,
+                font_path=font_path,
+                font_size=font_size,
+                frame_height=frame_height,
+                cp_range=cp_range,
+                glyph_metrics=range_glyph_metrics,
+                font_metrics=font_metrics,
+                output_directory=output_directory,
+                draw_settings=draw_settings,
             )
-            for cp_range in ranges
+            for cp_range, range_glyph_metrics in zip(cp_ranges, glyph_metrics)
         ]
-        for _ in tqdm.tqdm(pool.imap_unordered(mp_work, tasks), total=len(ranges)):
+        for _ in tqdm.tqdm(pool.imap_unordered(mp_work, tasks), total=len(cp_ranges)):
             pass
 
 
