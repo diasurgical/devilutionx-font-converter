@@ -1,0 +1,8 @@
+[*.py]
+end_of_line = lf
+
+[*.toml]
+end_of_line = lf
+
+[*.md]
+end_of_line = lf
