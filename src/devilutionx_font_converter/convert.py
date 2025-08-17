@@ -15,8 +15,10 @@ _DATADIR = os.path.join(os.path.dirname(__file__), "data")
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DrawSettings:
+    font_size: int
     stroke_color: str
-    stroke_width: int
+    stroke_width: float
+    supersampling: float
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -33,11 +35,11 @@ def make_glyphs(
     cp_range: tuple[int, int],
     range_metrics: list[GlyphMetrics],
     output_directory: str,
-):
+) -> None:
     code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
     widths = [m.text_width for m in range_metrics]
-    img_width = max(widths) + 2 * cfg.stroke_width
-    img_height = frame_height * 256
+    img_width = int(max(widths) + 2 * cfg.stroke_width * cfg.supersampling)
+    img_height = int(frame_height * cfg.supersampling * 256)
     img = PIL.Image.new("RGBA", (img_width, img_height))
     ctx = PIL.ImageDraw.Draw(img)
 
@@ -46,10 +48,13 @@ def make_glyphs(
             if widths[i] == 0:
                 continue
             ctx.text(
-                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                (
+                    cfg.stroke_width * cfg.supersampling,
+                    i * frame_height * cfg.supersampling + cfg.stroke_width,
+                ),
                 cp,
                 font=font,
-                stroke_width=cfg.stroke_width,
+                stroke_width=cfg.stroke_width * cfg.supersampling,
                 stroke_fill=cfg.stroke_color,
             )
     else:
@@ -60,7 +65,10 @@ def make_glyphs(
             if widths[i] == 0:
                 continue
             text_mask_ctx.text(
-                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                (
+                    cfg.stroke_width * cfg.supersampling,
+                    i * frame_height * cfg.supersampling + cfg.stroke_width,
+                ),
                 cp,
                 font=font,
             )
@@ -71,18 +79,29 @@ def make_glyphs(
             if widths[i] == 0:
                 continue
             stroke_mask_ctx.text(
-                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                (
+                    cfg.stroke_width * cfg.supersampling,
+                    i * frame_height * cfg.supersampling + cfg.stroke_width,
+                ),
                 cp,
                 font=font,
                 fill=(0, 0, 0, 0),
-                stroke_width=cfg.stroke_width,
+                stroke_width=cfg.stroke_width * cfg.supersampling,
                 stroke_fill=cfg.stroke_color,
             )
         img.paste(cfg.stroke_color, stroke_mask)
-        img.paste(tiled_texture.crop((0, 0, img.width, img.height)), text_mask)
 
     group_name = f"{cp_range[0] // 256:02x}"
-    output_prefix = os.path.join(output_directory, f"{font.size}-{group_name}")
+    output_prefix = os.path.join(output_directory, f"{cfg.font_size}-{group_name}")
+
+    if cfg.supersampling != 1.0:
+        widths = [math.ceil(w / cfg.supersampling) for w in widths]
+        img = img.resize(size=(max(widths), frame_height * 256))
+        text_mask = text_mask.resize(size=(max(widths), frame_height * 256))
+
+    if tiled_texture is not None:
+        img.paste(tiled_texture.crop((0, 0, img.width, img.height)), text_mask)
+
     img.save(f"{output_prefix}.png")
 
     convert_rgba_to_pcx_8bit(
@@ -106,7 +125,7 @@ def convert_rgba_to_pcx_8bit(
     transparency_threshold: int = 0,
     partial_alpha_background: tuple[int, int, int] = (0, 0, 0),
     palette_transparent_index: int = 1,
-):
+) -> None:
     """Converts an RGBA image to 8-bit PCX image with palette.
 
     Args:
@@ -197,21 +216,23 @@ def convert_font(
     font_path: str,
     output_directory: str,
     texture_path: str,
-    font_size: int,
     frame_height: int,
     min_cp: int,
     max_cp: int,
     cfg: DrawSettings,
 ) -> None:
     cp_ranges, ranges_metrics = get_code_point_ranges(
-        font_path=font_path, font_size=font_size, min_cp=min_cp, max_cp=max_cp
+        font_path=font_path,
+        font_size=round(cfg.font_size * cfg.supersampling),
+        min_cp=min_cp,
+        max_cp=max_cp,
     )
     os.makedirs(output_directory, exist_ok=True)
 
     with open(os.path.join(_DATADIR, "palette.pal"), "rb") as f:
         palette = f.read()
 
-    font = PIL.ImageFont.truetype(font_path, font_size)
+    font = PIL.ImageFont.truetype(font_path, cfg.font_size * cfg.supersampling)
     tiled_texture = (
         created_tiled_texture(texture_path, frame_height) if texture_path else None
     )
@@ -249,20 +270,22 @@ def main_cli() -> None:
     argparser.add_argument("--min_cp", type=lambda x: int(x, 0), default=0)
     argparser.add_argument("--max_cp", type=lambda x: int(x, 0), default=0x110000)
     argparser.add_argument("--stroke_color", type=str, default="rgb(19, 11, 0)")
-    argparser.add_argument("--stroke_width", type=int, default=1)
+    argparser.add_argument("--stroke_width", type=float, default=1.0)
+    argparser.add_argument("--supersampling", type=float, default=1.0)
     args = argparser.parse_args()
 
     convert_font(
         font_path=args.font_path,
         texture_path=args.texture_path,
         output_directory=args.output_directory,
-        font_size=args.font_size,
         frame_height=args.frame_height,
         min_cp=args.min_cp,
         max_cp=args.max_cp,
         cfg=DrawSettings(
+            font_size=args.font_size,
             stroke_color=args.stroke_color,
             stroke_width=args.stroke_width,
+            supersampling=args.supersampling,
         ),
     )
 

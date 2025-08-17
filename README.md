@@ -11,7 +11,7 @@ Example usage (with [uv](https://github.com/astral-sh/uv)):
 ```bash
 uv run devilutionx-font-converter \
   --font_path ~/Downloads/NotoSansCJKjp-hinted/NotoSansCJKjp-Regular.otf \
-  --output_directory=tmp/noto_ja \
+  --output_directory=tmp/noto_ja_12 \
   --font_size=12 \
   --frame_height=20
 ```
@@ -26,5 +26,6 @@ uv run devilutionx-font-converter \
   --frame_height=64 \
   --min_cp=0x4e00 \
   --max_cp=0xff00 \
-  --stroke_width=3
+  --stroke_width=2.5 \
+  --supersampling=2
 ```
