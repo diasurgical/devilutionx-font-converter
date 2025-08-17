@@ -162,8 +162,12 @@ def convert_rgba_to_pcx_8bit(
     quantized.save(output_path, palette=palette, transparency=palette_transparent_index)
 
 
-def created_tiled_texture(texture_path: str, frame_height: int) -> PIL.Image.Image:
+def created_tiled_texture(
+    texture_path: str, frame_height: int, scale: int = 0.91
+) -> PIL.Image.Image:
     tile = PIL.Image.open(texture_path)
+    if scale != 1.0:
+        tile = tile.resize((round(tile.width * scale), round(tile.height * scale)))
     height = frame_height * 256
     width = int(height * 1.2)
     tiled_texture = PIL.Image.new("RGBA", (width, height))
