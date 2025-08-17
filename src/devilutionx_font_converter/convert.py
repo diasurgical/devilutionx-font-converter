@@ -81,7 +81,7 @@ def make_glyphs(
         img.paste(cfg.stroke_color, stroke_mask)
         img.paste(tiled_texture.crop((0, 0, img.width, img.height)), text_mask)
 
-    group_name = f"{cp_range[0] // 256:04X}"
+    group_name = f"{cp_range[0] // 256:02x}"
     output_prefix = os.path.join(output_directory, f"{font.size}-{group_name}")
     img.save(f"{output_prefix}.png")
 
@@ -91,12 +91,12 @@ def make_glyphs(
         palette=palette,
     )
 
-    font.font.glyphs
-    with open(f"{output_prefix}.txt", "w") as f:
-        f.write(
-            "\n".join(str(w + 2 * cfg.stroke_width if w > 0 else 0) for w in widths)
-            + "\n"
-        )
+    if not all(w == widths[0] for w in widths):
+        with open(f"{output_prefix}.txt", "w") as f:
+            f.write(
+                "\n".join(str(w + 2 * cfg.stroke_width if w > 0 else 0) for w in widths)
+                + "\n"
+            )
 
 
 def convert_rgba_to_pcx_8bit(
@@ -144,12 +144,16 @@ def convert_rgba_to_pcx_8bit(
 
 
 def created_tiled_texture(texture_path: str, frame_height: int) -> PIL.Image.Image:
-    texture = PIL.Image.open(texture_path)
-    tile = texture.crop((0, 0, texture.width, frame_height))
-    tiled_texture = PIL.Image.new("RGBA", (texture.width, frame_height * 256))
-    for y in range(0, tiled_texture.height, tile.height):
-        for x in range(0, tiled_texture.width, tile.width):
-            tiled_texture.paste(tile, (x, y))
+    tile = PIL.Image.open(texture_path)
+    height = frame_height * 256
+    width = int(height * 1.2)
+    tiled_texture = PIL.Image.new("RGBA", (width, height))
+    for y in range(0, height, tile.height):
+        for x in range(0, width, tile.width):
+            if y + tile.height > height or x + tile.width > width:
+                tiled_texture.paste(tile.crop((0, 0, width - x, height - y)), (x, y))
+            else:
+                tiled_texture.paste(tile, (x, y))
     return tiled_texture
 
 
@@ -242,8 +246,8 @@ def main_cli() -> None:
     argparser.add_argument("--output_directory", type=str, required=True)
     argparser.add_argument("--font_size", type=int, required=True)
     argparser.add_argument("--frame_height", type=int, required=True)
-    argparser.add_argument("--min_cp", type=int, default=0)
-    argparser.add_argument("--max_cp", type=int, default=0x110000)
+    argparser.add_argument("--min_cp", type=lambda x: int(x, 0), default=0)
+    argparser.add_argument("--max_cp", type=lambda x: int(x, 0), default=0x110000)
     argparser.add_argument("--stroke_color", type=str, default="rgb(19, 11, 0)")
     argparser.add_argument("--stroke_width", type=int, default=1)
     args = argparser.parse_args()
