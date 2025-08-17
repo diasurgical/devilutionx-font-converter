@@ -1,14 +1,14 @@
 import argparse
+import concurrent.futures
 import dataclasses
 import math
-import multiprocessing
 import os
 
 import PIL.Image
+import PIL.ImageDraw
+import PIL.ImageFont
 import freetype
 import tqdm
-import wand.drawing
-import wand.image
 
 _DATADIR = os.path.join(os.path.dirname(__file__), "data")
 
@@ -20,130 +20,106 @@ class DrawSettings:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class FontMetrics:
-    ascender: int
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
 class GlyphMetrics:
     text_width: int
 
 
-def get_text_y(m: FontMetrics, i: int, frame_height: int) -> int:
-    return m.ascender + (i * frame_height)
-
-
 def make_glyphs(
-    font_path: str,
-    font_size: int,
-    draw_settings: DrawSettings,
-    tiled_texture: wand.image.Image | None,
+    font: PIL.ImageFont.FreeTypeFont,
+    cfg: DrawSettings,
+    tiled_texture: PIL.Image.Image | None,
+    palette: bytes,
     frame_height: int,
     cp_range: tuple[int, int],
-    glyph_metrics: list[GlyphMetrics],
-    font_metrics: FontMetrics,
+    range_metrics: list[GlyphMetrics],
     output_directory: str,
 ):
-    with wand.drawing.Drawing() as ctx:
-        ctx.font = font_path
-        ctx.font_size = font_size
+    code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
+    widths = [m.text_width for m in range_metrics]
+    img_width = max(widths) + 2 * cfg.stroke_width
+    img_height = frame_height * 256
+    img = PIL.Image.new("RGBA", (img_width, img_height))
+    ctx = PIL.ImageDraw.Draw(img)
 
-        if tiled_texture is None:
-            ctx.stroke_color = draw_settings.stroke_color
-            ctx.stroke_width = draw_settings.stroke_width
+    if tiled_texture is None:
+        for i, cp in enumerate(code_points):
+            if widths[i] == 0:
+                continue
+            ctx.text(
+                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                cp,
+                font=font,
+                stroke_width=cfg.stroke_width,
+                stroke_fill=cfg.stroke_color,
+            )
+    else:
+        # Create a mask from the text
+        text_mask = PIL.Image.new("RGBA", (img_width, img_height), 0)
+        text_mask_ctx = PIL.ImageDraw.Draw(text_mask)
+        for i, cp in enumerate(code_points):
+            if widths[i] == 0:
+                continue
+            text_mask_ctx.text(
+                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                cp,
+                font=font,
+            )
 
-        code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
-        max_width = (
-            max(m.text_width for m in glyph_metrics) + 2 * draw_settings.stroke_width
+        stroke_mask = PIL.Image.new("RGBA", (img_width, img_height))
+        stroke_mask_ctx = PIL.ImageDraw.Draw(stroke_mask)
+        for i, cp in enumerate(code_points):
+            if widths[i] == 0:
+                continue
+            stroke_mask_ctx.text(
+                (cfg.stroke_width, i * frame_height + cfg.stroke_width),
+                cp,
+                font=font,
+                fill=(0, 0, 0, 0),
+                stroke_width=cfg.stroke_width,
+                stroke_fill=cfg.stroke_color,
+            )
+        img.paste(cfg.stroke_color, stroke_mask)
+        img.paste(tiled_texture.crop((0, 0, img.width, img.height)), text_mask)
+
+    group_name = f"{cp_range[0] // 256:04X}"
+    output_prefix = os.path.join(output_directory, f"{font.size}-{group_name}")
+    img.save(f"{output_prefix}.png")
+
+    convert_rgba_to_pcx_8bit(
+        image=img,
+        output_path=f"{output_prefix}.pcx",
+        palette=palette,
+    )
+
+    font.font.glyphs
+    with open(f"{output_prefix}.txt", "w") as f:
+        f.write(
+            "\n".join(str(w + 2 * cfg.stroke_width if w > 0 else 0) for w in widths)
+            + "\n"
         )
 
-        for i, cp in enumerate(code_points):
-            ctx.text(
-                x=draw_settings.stroke_width,
-                y=get_text_y(font_metrics, i, frame_height)
-                + draw_settings.stroke_width,
-                body=cp,
-            )
 
-        if tiled_texture is not None:
-            ctx.composite(
-                operator="src_atop",
-                left=0,
-                top=0,
-                width=max_width,
-                height=frame_height * 256,
-                image=tiled_texture,
-            )
-
-            with wand.image.Image(
-                width=max_width, height=frame_height * 256
-            ) as stroke_img:
-                with wand.drawing.Drawing() as stroke_ctx:
-                    stroke_ctx.font = font_path
-                    stroke_ctx.font_size = font_size
-                    stroke_ctx.fill_color = "none"
-                    stroke_ctx.stroke_color = draw_settings.stroke_color
-                    stroke_ctx.stroke_width = draw_settings.stroke_width
-                    for i, cp in enumerate(code_points):
-                        stroke_ctx.text(
-                            x=draw_settings.stroke_width,
-                            y=get_text_y(font_metrics, i, frame_height)
-                            + draw_settings.stroke_width,
-                            body=cp,
-                        )
-                    stroke_ctx.draw(stroke_img)
-                ctx.composite(
-                    operator="plus",
-                    left=0,
-                    top=0,
-                    width=0,  # use existing width
-                    height=0,  # use existing height
-                    image=stroke_img,
-                )
-
-        group_name = f"{cp_range[0] // 256:04X}"
-        output_prefix = os.path.join(output_directory, f"{font_size}-{group_name}")
-        with wand.image.Image(width=max_width, height=frame_height * 256) as img:
-            ctx.draw(img)
-            img.save(filename=f"{output_prefix}.png")
-
-        convert_png_rgba_to_pcx_8bit(output_prefix)
-
-        with open(f"{output_prefix}.txt", "w") as f:
-            f.write(
-                "\n".join(
-                    str(m.text_width + 2 * draw_settings.stroke_width)
-                    for m in glyph_metrics
-                )
-                + "\n"
-            )
-
-
-def convert_png_rgba_to_pcx_8bit(
-    path_prefix: str,
+def convert_rgba_to_pcx_8bit(
+    image: PIL.Image.Image,
+    output_path: str,
+    palette: bytes,
     transparency_threshold: int = 0,
     partial_alpha_background: tuple[int, int, int] = (0, 0, 0),
     palette_transparent_index: int = 1,
 ):
-    """Converts a PNG image to 8-bit PCX image with _PALETTE.
+    """Converts an RGBA image to 8-bit PCX image with palette.
 
     Args:
-        path_prefix: basename of the PNG file (without extension).
+        image: The image to convert.
+        output_path: The output file path.
         transparency_threshold: Pixels with alpha <= this threshold will be made fully transparent.
         partial_alpha_background: Partially transparent pixels will be blended with this color.
-        palette_transparent_index: The index of the transparent color in `_PALETTE`.
+        palette_transparent_index: The index of the transparent color in `palette`.
     """
-    palette = _PALETTE
-
-    im = PIL.Image.open(f"{path_prefix}.png")
-
-    if im.getbands().count != 4:
-        im = im.convert("RGBA")
-
-    alpha = im.getchannel("A")
+    alpha = image.getchannel("A")
     blend_mask = alpha.point(lambda p: 0 if p <= transparency_threshold else p)
-    im_rgb = PIL.Image.new("RGB", im.size, partial_alpha_background)
-    im_rgb.paste(im, (0, 0), blend_mask)
+    im_rgb = PIL.Image.new("RGB", image.size, partial_alpha_background)
+    im_rgb.paste(image, (0, 0), blend_mask)
 
     # Can't figure out how to quantize images with mask.
     # For now, as a hack, we fill transparent pixels with the RGB color
@@ -164,28 +140,27 @@ def convert_png_rgba_to_pcx_8bit(
     im_pal.putpalette(palette)
 
     quantized = im_rgb.quantize(palette=im_pal)
-    quantized.save(
-        f"{path_prefix}.pcx", palette=palette, transparency=palette_transparent_index
-    )
+    quantized.save(output_path, palette=palette, transparency=palette_transparent_index)
 
 
-def created_tiled_texture(texture_path: str, frame_height: int) -> wand.image.Image:
-    texture = wand.image.Image(filename=texture_path)
-    with texture.clone() as tile:
-        tile.crop(bottom=frame_height)
-        tiled_texture = wand.image.Image(width=100, height=frame_height * 256)
-        tiled_texture.texture(tile)
+def created_tiled_texture(texture_path: str, frame_height: int) -> PIL.Image.Image:
+    texture = PIL.Image.open(texture_path)
+    tile = texture.crop((0, 0, texture.width, frame_height))
+    tiled_texture = PIL.Image.new("RGBA", (texture.width, frame_height * 256))
+    for y in range(0, tiled_texture.height, tile.height):
+        for x in range(0, tiled_texture.width, tile.width):
+            tiled_texture.paste(tile, (x, y))
     return tiled_texture
 
 
 def get_code_point_ranges(
     font_path: str, font_size: int, min_cp: int, max_cp: int
-) -> tuple[FontMetrics, list[tuple[int, int]], list[list[GlyphMetrics]]]:
+) -> tuple[list[tuple[int, int]], list[list[GlyphMetrics]]]:
     ft_font = freetype.Face(font_path)
     ft_font.set_char_size(font_size << 6)
 
     ranges = []
-    ranges_metrics: list[list[FontMetrics]] = []
+    ranges_metrics: list[list[GlyphMetrics]] = []
     for begin in range(min_cp, max_cp + 1, 256):
         if begin >= 0xD800 and begin <= 0xDFFF:
             # Surrogate range
@@ -211,51 +186,7 @@ def get_code_point_ranges(
             ranges.append((begin, end))
             ranges_metrics.append(range_metrics)
 
-    ft_size_metrics: freetype.SizeMetrics = ft_font.size
-    font_metrics = FontMetrics(
-        ascender=math.ceil(
-            freetype.FT_MulFix(ft_size_metrics.ascender, ft_size_metrics.y_scale) / 64
-        ),
-    )
-
-    return font_metrics, ranges, ranges_metrics
-
-
-_PALETTE = None
-_MP_TILED_TEXTURE = None
-
-
-def mp_init(texture_path: str):
-    if not texture_path:
-        return
-    global _MP_TILED_TEXTURE
-    _MP_TILED_TEXTURE = created_tiled_texture(texture_path, 100)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class MpTask:
-    font_path: str
-    font_size: int
-    frame_height: int
-    cp_range: tuple[int, int]
-    glyph_metrics: list[GlyphMetrics]
-    font_metrics: FontMetrics
-    output_directory: str
-    draw_settings: DrawSettings
-
-
-def mp_work(task: MpTask):
-    make_glyphs(
-        font_path=task.font_path,
-        font_size=task.font_size,
-        draw_settings=task.draw_settings,
-        tiled_texture=_MP_TILED_TEXTURE,
-        frame_height=task.frame_height,
-        cp_range=task.cp_range,
-        glyph_metrics=task.glyph_metrics,
-        font_metrics=task.font_metrics,
-        output_directory=task.output_directory,
-    )
+    return ranges, ranges_metrics
 
 
 def convert_font(
@@ -266,38 +197,40 @@ def convert_font(
     frame_height: int,
     min_cp: int,
     max_cp: int,
-    draw_settings: DrawSettings,
+    cfg: DrawSettings,
 ) -> None:
-    font_metrics, cp_ranges, glyph_metrics = get_code_point_ranges(
+    cp_ranges, ranges_metrics = get_code_point_ranges(
         font_path=font_path, font_size=font_size, min_cp=min_cp, max_cp=max_cp
     )
     os.makedirs(output_directory, exist_ok=True)
 
-    global _PALETTE
     with open(os.path.join(_DATADIR, "palette.pal"), "rb") as f:
-        _PALETTE = f.read()
+        palette = f.read()
 
-    # Threading doesn't appear to work with wand-py, so we use multiprocessing.
-    with multiprocessing.Pool(
-        processes=os.cpu_count(),
-        initializer=mp_init,
-        initargs=[texture_path],
-    ) as pool:
-        tasks = [
-            MpTask(
-                font_path=font_path,
-                font_size=font_size,
+    font = PIL.ImageFont.truetype(font_path, font_size)
+    tiled_texture = (
+        created_tiled_texture(texture_path, frame_height) if texture_path else None
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [
+            executor.submit(
+                make_glyphs,
+                font=font,
+                cfg=cfg,
+                tiled_texture=tiled_texture,
+                palette=palette,
                 frame_height=frame_height,
                 cp_range=cp_range,
-                glyph_metrics=range_glyph_metrics,
-                font_metrics=font_metrics,
+                range_metrics=range_metrics,
                 output_directory=output_directory,
-                draw_settings=draw_settings,
             )
-            for cp_range, range_glyph_metrics in zip(cp_ranges, glyph_metrics)
+            for cp_range, range_metrics in zip(cp_ranges, ranges_metrics)
         ]
-        for _ in tqdm.tqdm(pool.imap_unordered(mp_work, tasks), total=len(cp_ranges)):
-            pass
+        for future in tqdm.tqdm(
+            concurrent.futures.as_completed(futures), total=len(cp_ranges)
+        ):
+            future.result()
 
 
 def main_cli() -> None:
@@ -323,7 +256,7 @@ def main_cli() -> None:
         frame_height=args.frame_height,
         min_cp=args.min_cp,
         max_cp=args.max_cp,
-        draw_settings=DrawSettings(
+        cfg=DrawSettings(
             stroke_color=args.stroke_color,
             stroke_width=args.stroke_width,
         ),
