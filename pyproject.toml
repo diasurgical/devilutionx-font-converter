@@ -9,9 +9,10 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
   "freetype-py>=2.5.1",
+  "numpy>=2.3.2",
   "pillow>=11.3.0",
+  "scipy>=1.16.1",
   "tqdm>=4.67.1",
-  
 ]
 
 [project.scripts]
