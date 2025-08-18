@@ -26,7 +26,6 @@ uv run devilutionx-font-converter \
   --frame_height=64 \
   --min_cp=0x4e00 \
   --max_cp=0xff00 \
-  --stroke_width=2.5 \
   --outer_bevel_size=2.5 \
   --supersampling=2
 ```

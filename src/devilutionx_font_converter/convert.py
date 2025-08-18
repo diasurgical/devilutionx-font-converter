@@ -50,7 +50,8 @@ def make_glyphs(
 
     code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
     widths = [m.text_width for m in range_metrics]
-    img_width = round(max(widths) + 2 * cfg.stroke_width * cfg.supersampling)
+    pad = max(cfg.stroke_width, cfg.outer_bevel_size)
+    img_width = round(max(widths) + 2 * pad * cfg.supersampling)
     img_height = round(frame_height * cfg.supersampling * 256)
 
     # Create a mask from the text
@@ -61,16 +62,22 @@ def make_glyphs(
             continue
         text_mask_ctx.text(
             (
-                round(cfg.stroke_width * cfg.supersampling),
-                round((i * frame_height + cfg.stroke_width) * cfg.supersampling),
+                round(pad * cfg.supersampling),
+                round((i * frame_height + pad) * cfg.supersampling),
             ),
             cp,
             font=font,
             fill=(0, 0, 0, 255),
         )
 
-    textured_text = PIL.Image.new("RGBA", (img_width, img_height))
-    textured_text.paste(tiled_texture.crop((0, 0, img_width, img_height)), text_mask)
+    if tiled_texture is not None:
+        textured_text = PIL.Image.new("RGBA", (img_width, img_height))
+        textured_text.paste(
+            tiled_texture.crop((0, 0, img_width, img_height)), text_mask
+        )
+    else:
+        textured_text = text_mask
+
     if cfg.outer_bevel_size != 0.0:
         img = apply_outer_bevel(
             image=textured_text,
@@ -80,7 +87,7 @@ def make_glyphs(
             highlight_color=cfg.highlight_color,
             shadow_color=cfg.shadow_color,
         )
-    else:
+    elif cfg.stroke_width != 0.0:
         stroked_text = PIL.Image.new("RGBA", (img_width, img_height))
         stroke_mask_ctx = PIL.ImageDraw.Draw(stroked_text)
         for i, cp in enumerate(code_points):
@@ -88,8 +95,8 @@ def make_glyphs(
                 continue
             stroke_mask_ctx.text(
                 (
-                    round(cfg.stroke_width * cfg.supersampling),
-                    round((i * frame_height + cfg.stroke_width) * cfg.supersampling),
+                    round(pad * cfg.supersampling),
+                    round((i * frame_height + pad) * cfg.supersampling),
                 ),
                 cp,
                 font=font,
@@ -101,6 +108,8 @@ def make_glyphs(
         img = PIL.Image.new("RGBA", (img_width, img_height))
         img.paste(stroked_text, PIL.ImageChops.subtract(stroked_text, text_mask))
         img.paste(textured_text)
+    else:
+        img = textured_text
 
     if cfg.supersampling != 1.0:
         widths = [math.ceil(w / cfg.supersampling) for w in widths]
@@ -119,7 +128,7 @@ def make_glyphs(
     if not all(w == widths[0] for w in widths):
         with open(f"{output_prefix}.txt", "w") as f:
             f.write(
-                "\n".join(str(w + 2 * cfg.stroke_width if w > 0 else 0) for w in widths)
+                "\n".join(str(math.ceil(w + 2 * pad) if w > 0 else 0) for w in widths)
                 + "\n"
             )
 
