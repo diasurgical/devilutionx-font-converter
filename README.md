@@ -21,6 +21,18 @@ Advanced usage:
 ```bash
 uv run devilutionx-font-converter \
   --font_path ~/Downloads/NotoSansCJKjp-hinted/NotoSansCJKjp-Regular.otf \
+  --output_directory=tmp/noto_ja_12 \
+  --font_size=17 \
+  --frame_height=20 \
+  --output_basename_prefix=12 \
+  --min_cp=0x4e00 \
+  --max_cp=0xff00 \
+  --stroke_width=1
+```
+
+```bash
+uv run devilutionx-font-converter \
+  --font_path ~/Downloads/NotoSansCJKjp-hinted/NotoSansCJKjp-Regular.otf \
   --output_directory=tmp/noto_ja_46 \
   --font_size=46 \
   --frame_height=64 \

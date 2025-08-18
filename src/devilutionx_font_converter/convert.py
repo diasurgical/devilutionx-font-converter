@@ -44,9 +44,12 @@ def make_glyphs(
     cp_range: tuple[int, int],
     range_metrics: list[GlyphMetrics],
     output_directory: str,
+    output_basename_prefix: str,
 ) -> None:
     group_name = f"{cp_range[0] // 256:02x}"
-    output_prefix = os.path.join(output_directory, f"{cfg.font_size}-{group_name}")
+    output_prefix = os.path.join(
+        output_directory, f"{output_basename_prefix}-{group_name}"
+    )
 
     code_points = [chr(cp_i) for cp_i in range(cp_range[0], cp_range[1])]
     widths = [m.text_width for m in range_metrics]
@@ -100,14 +103,14 @@ def make_glyphs(
                 ),
                 cp,
                 font=font,
-                fill=(0, 0, 0, 255),
+                fill=(0, 0, 0, 0),
                 stroke_width=cfg.stroke_width * cfg.supersampling,
                 stroke_fill=cfg.stroke_color,
             )
 
         img = PIL.Image.new("RGBA", (img_width, img_height))
-        img.paste(stroked_text, PIL.ImageChops.subtract(stroked_text, text_mask))
-        img.paste(textured_text)
+        img.paste(stroked_text)
+        img.paste(textured_text, mask=textured_text)
     else:
         img = textured_text
 
@@ -238,6 +241,7 @@ def get_code_point_ranges(
 def convert_font(
     font_path: str,
     output_directory: str,
+    output_basename_prefix: str,
     texture_path: str,
     frame_height: int,
     min_cp: int,
@@ -279,6 +283,7 @@ def convert_font(
                 cp_range=cp_range,
                 range_metrics=range_metrics,
                 output_directory=output_directory,
+                output_basename_prefix=output_basename_prefix,
             )
             for cp_range, range_metrics in zip(cp_ranges, ranges_metrics)
         ]
@@ -295,6 +300,7 @@ def main_cli() -> None:
         "--texture_path", type=str, default=os.path.join(_DATADIR, "texture.png")
     )
     argparser.add_argument("--output_directory", type=str, required=True)
+    argparser.add_argument("--output_basename_prefix", type=str)
     argparser.add_argument("--font_size", type=int, required=True)
     argparser.add_argument("--frame_height", type=int, required=True)
     argparser.add_argument("--min_cp", type=lambda x: int(x, 0), default=0)
@@ -314,6 +320,11 @@ def main_cli() -> None:
         font_path=args.font_path,
         texture_path=args.texture_path,
         output_directory=args.output_directory,
+        output_basename_prefix=(
+            args.output_basename_prefix
+            if args.output_basename_prefix
+            else str(args.font_size)
+        ),
         frame_height=args.frame_height,
         min_cp=args.min_cp,
         max_cp=args.max_cp,
