@@ -45,6 +45,7 @@ def make_glyphs(
     range_metrics: list[GlyphMetrics],
     output_directory: str,
     output_basename_prefix: str,
+    save_png: bool,
 ) -> None:
     group_name = f"{cp_range[0] // 256:02x}"
     output_prefix = os.path.join(
@@ -118,7 +119,8 @@ def make_glyphs(
         widths = [math.ceil(w / cfg.supersampling) for w in widths]
         img = img.resize(size=(max(widths), frame_height * 256))
 
-    img.save(f"{output_prefix}.png")
+    if save_png:
+        img.save(f"{output_prefix}.png")
 
     convert_rgba_to_pcx_8bit(
         image=img,
@@ -184,22 +186,31 @@ def create_tiled_texture(
     texture_path: str, frame_height: int, supersampling: float, scale: float
 ) -> PIL.Image.Image:
     tile = PIL.Image.open(texture_path)
-    if scale != 1.0:
-        tile = tile.resize((round(tile.width * scale), round(tile.height * scale)))
-    height = frame_height * 256
-    width = int(height * 1.2)
+    if scale != 1.0 or supersampling != 1.0:
+        tile = tile.resize(
+            (
+                round(tile.width * scale * supersampling),
+                round(tile.height * scale * supersampling),
+            )
+        )
+
+    height = round(frame_height * 256 * supersampling)
+    width = round(height * 1.2 * supersampling)
+
+    x_tiled_texture = PIL.Image.new("RGBA", (width, tile.height))
+    for x in range(0, width, tile.width):
+        if x + tile.width > width:
+            x_tiled_texture.paste(tile.crop((0, 0, width - x, height)), (x, 0))
+        else:
+            x_tiled_texture.paste(tile, (x, 0))
+
     tiled_texture = PIL.Image.new("RGBA", (width, height))
     for y in range(0, height, tile.height):
-        for x in range(0, width, tile.width):
-            if y + tile.height > height or x + tile.width > width:
-                tiled_texture.paste(tile.crop((0, 0, width - x, height - y)), (x, y))
-            else:
-                tiled_texture.paste(tile, (x, y))
-    if supersampling == 1.0:
-        return tiled_texture
-    return tiled_texture.resize(
-        (round(width * supersampling), round(height * supersampling))
-    )
+        if y + tile.height > height:
+            tiled_texture.paste(x_tiled_texture.crop((0, 0, width, height - y)), (0, y))
+        else:
+            tiled_texture.paste(x_tiled_texture, (0, y))
+    return tiled_texture
 
 
 def get_code_point_ranges(
@@ -242,6 +253,7 @@ def convert_font(
     font_path: str,
     output_directory: str,
     output_basename_prefix: str,
+    save_png: bool,
     texture_path: str,
     frame_height: int,
     min_cp: int,
@@ -284,6 +296,7 @@ def convert_font(
                 range_metrics=range_metrics,
                 output_directory=output_directory,
                 output_basename_prefix=output_basename_prefix,
+                save_png=save_png,
             )
             for cp_range, range_metrics in zip(cp_ranges, ranges_metrics)
         ]
@@ -301,6 +314,9 @@ def main_cli() -> None:
     )
     argparser.add_argument("--output_directory", type=str, required=True)
     argparser.add_argument("--output_basename_prefix", type=str)
+    argparser.add_argument(
+        "--save_png", type=bool, default=False, action=argparse.BooleanOptionalAction
+    )
     argparser.add_argument("--font_size", type=int, required=True)
     argparser.add_argument("--frame_height", type=int, required=True)
     argparser.add_argument("--min_cp", type=lambda x: int(x, 0), default=0)
@@ -325,6 +341,7 @@ def main_cli() -> None:
             if args.output_basename_prefix
             else str(args.font_size)
         ),
+        save_png=args.save_png,
         frame_height=args.frame_height,
         min_cp=args.min_cp,
         max_cp=args.max_cp,
